@@ -1,6 +1,6 @@
 
 #
-#	Makefile for interrupt project
+#	Makefile for ipc methods project
 #
 
 DEBUG = -g
