@@ -3,14 +3,14 @@
  *
  *  Created on: Feb 17, 2022
  *      Author: kt
- */
-#include <stdio.h>
-#include <unistd.h>
+*/
+#include "ipc_methods.h"
+#include "msg.h"
 
 int main(int argc, char* argv[]) {
-	while (1) {
-		printf("Hello\n");
-		sleep(2);
-	}
+	ipc_info info;
+	printInstruction();
+	info = checkOptions(argc, argv);
+	run_IPC(&info, RECEIVE);
 	return 0;
 }
