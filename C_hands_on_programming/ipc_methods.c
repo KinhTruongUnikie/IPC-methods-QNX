@@ -51,7 +51,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 			case 'h': {
 				printf("<HELP>\n"
 						"--message: client-server model, carries priority, QNX native API(argument <serverName>)\n"
-						"--pipe: POSIX, one directional message flow, slow, does not carry priority, portable(argument <TBD>)\n"
+						"--pipe: POSIX, one directional(unamed pipe) message flow, slow, does not carry priority, portable(argument <TBD>)\n"
 						"--queue: POSIX, basically pipe with extra feature(argument <TBD>)\n"
 						"--shm: use shared memory region for message passing, required synchronization measure, e.g mutex, condvar(argument <bufferSize>)\n"
 						"--file: add the file for data transfer (argument <fileName>)\n"
@@ -114,12 +114,87 @@ ipc_info checkOptions (int argc, char* argv[]) {
 	}
 	return info;
 }
-
+// This version of messageSend implemented using read()
+#if 0
 void messageSend(const ipc_info *info) {
 	printf("Starting messageSend..\n"
 			"If client specified server name does not exist, this program is stuck in an infinite loop looking for a server\n"
 			);
 
+	int fd, current, coid, status, size;
+    header_t header;
+    char* buffer = NULL;
+    iov_t siov[2];
+	// open file for reading
+	fd = open(info->filename, O_RDONLY);
+	if (fd == -1) {
+		perror("open\n");
+		exit(EXIT_FAILURE);
+	}
+
+	printf("Looking for server..\n");
+    //Server search loop
+    while ((coid = name_open(info->argument_string, 0)) == -1)
+    {
+        sleep(1);
+    }
+    printf("Found the server connection!\n");
+
+    //Start message reading
+
+    current = lseek(fd, 0, SEEK_CUR);
+    size = lseek(fd, 0, SEEK_END);
+    //set the file pointer back to beginning of file
+    lseek(fd, current, SEEK_SET);
+
+	header.msg_type = HEADER_IOV_TYPE;
+	header.data_size = size;
+
+    if ((buffer = (char*)malloc(size)) == NULL) {
+    	perror("malloc\n");
+    	free(buffer);
+    	exit(EXIT_FAILURE);
+    }
+
+	//read the file
+    if (read(fd, buffer, size) == -1) {
+    	perror("read\n");
+    	exit(EXIT_FAILURE);
+    }
+
+    close(fd);
+
+	SETIOV(&siov[0], &header, sizeof(header));
+	SETIOV(&siov[1], buffer, header.data_size);
+
+	status = MsgSendvs(coid, siov, 2, NULL, 0);
+	if (status == -1) {
+		perror("MsgSendvs");
+		exit(EXIT_FAILURE);
+	}
+	free(buffer);
+
+	if (MsgSendPulse(coid, -1, EOF_PULSE_CODE, 0) == -1) {
+		perror("MsgSendPulse\n");
+		exit(EXIT_FAILURE);
+	} else {
+		printf("Exiting the program..\n");
+	}
+
+}
+#endif
+
+//This version of messageSend implemented using fread()
+#if 1
+void messageSend(const ipc_info *info) {
+	printf("Starting messageSend..\n"
+			"If client specified server name does not exist, this program is stuck in an infinite loop looking for a server\n"
+			);
+
+    int coid, status, size;
+    header_t header;
+    char* buffer = NULL;
+    iov_t siov[2];
 	FILE *read;
 	// open file for reading
 	read = fopen(info->filename, "rb");
@@ -128,18 +203,11 @@ void messageSend(const ipc_info *info) {
 		exit(EXIT_FAILURE);
 	}
 
-    int coid, status, size;
-    header_t header;
-    char* buffer = NULL;
-    iov_t siov[2];
-
-    coid = name_open(info->argument_string, 0);
-    printf("Looking for server..\n");
+	printf("Looking for server..\n");
     //Server search loop
-    while (coid == -1)
+    while ((coid = name_open(info->argument_string, 0)) == -1)
     {
         sleep(1);
-        coid = name_open(info->argument_string, 0);
     }
     printf("Found the server connection!\n");
 
@@ -148,27 +216,42 @@ void messageSend(const ipc_info *info) {
 	size = ftell(read);
 	fseek(read, 0, SEEK_SET);
 
-
 	header.msg_type = HEADER_IOV_TYPE;
-	header.data_size = size + 1;
-	buffer = (char*)malloc(header.data_size);
+	header.data_size = size;
+
+	if ((buffer = (char*)malloc(size)) == NULL) {
+    	perror("malloc\n");
+    	exit(EXIT_FAILURE);
+	}
+
+
 	//read the file
-    fread(buffer, size, 1, read);
+    if (fread(buffer, size, 1, read) != 1) {
+    	perror("fread\n");
+    	exit(EXIT_FAILURE);
+    }
 
     fclose(read);
 
 	SETIOV(&siov[0], &header, sizeof(header));
 	SETIOV(&siov[1], buffer, header.data_size);
 
-	free(buffer);
-
 	status = MsgSendvs(coid, siov, 2, NULL, 0);
 	if (status == -1) {
 		perror("MsgSendv");
 		exit(EXIT_FAILURE);
 	}
-	MsgSendPulse(coid, -1, EOF_PULSE_CODE, 0);
+	free(buffer);
+
+	if (MsgSendPulse(coid, -1, EOF_PULSE_CODE, 0) == -1) {
+		perror("MsgSendPulse\n");
+		exit(EXIT_FAILURE);
+	} else {
+		printf("Data is delivered. Exiting the program..\n");
+	}
 }
+#endif
+
 void messageReceive(const ipc_info *info) {
 	printf("Starting messageReceive..\n");
 	int rcvid;
@@ -191,7 +274,7 @@ void messageReceive(const ipc_info *info) {
 					perror("ConnectDetach\n");
 				}
 				if (eof) {
-					printf("Exiting the program..\n");
+					printf("Data is received. Exiting the program..\n");
 					break;
 				}
 			} else if (rbuf.pulse.code == EOF_PULSE_CODE) {
