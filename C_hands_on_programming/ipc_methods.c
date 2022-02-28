@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ipc_methods.h"
+#include <mqueue.h>
 #include "msg.h"
 
 // struct option longopts array
@@ -43,7 +44,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 	int qflag = 0;
 	int sflag = 0;
 	int fflag = 0;
-	// method id for choosing ipc method
+	// ipc methods and file info
 	ipc_info info;
 	while ((option = getopt_long(argc, argv, "hm:p:q:s:f:", longopts, NULL)) != -1) {
 		switch(option) {
@@ -70,6 +71,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 			}
 			case 'q': {
 				qflag++;
+				info.argument_string = optarg;
 				break;
 			}
 			case 's': {
@@ -95,16 +97,16 @@ ipc_info checkOptions (int argc, char* argv[]) {
 		} else {
 			if(mflag) {
 				printf("<message is used>\n");
-				info.method = message;
+				info.method = MESSAGE;
 			} else if(pflag){
 				printf("<pipe is used>\n");
-				info.method = pipes;
+				info.method = PIPES;
 			} else if (qflag) {
 				printf("<queue is used>\n");
-				info.method = queue;
+				info.method = QUEUE;
 			} else {
 				printf("<shm is used>\n");
-				info.method = shm;
+				info.method = SHM;
 			}
 		}
 	} else {
@@ -383,7 +385,7 @@ void pipeReceive(const ipc_info *info){
 	while ((fdp = open(info->argument_string, O_RDONLY)) == -1){}
 
 	 // open file for writing
-	 fd = open(info->filename, O_WRONLY | O_CREAT); //try O_APPEND, DPES WRONLY move file pointer, differences?
+	 fd = open(info->filename, O_WRONLY | O_CREAT, 0644);//mode(file permission should be specified if O_CREATE is used)
 	 if (fd == -1) {
 		 perror("open");
 		 exit(EXIT_FAILURE);
@@ -403,10 +405,91 @@ void pipeReceive(const ipc_info *info){
 }
 
 void queueSend(const ipc_info *info){
+	printf("Starting queueSend..\n");
+	struct mq_attr attrs;
+	struct stat st;
+	int size, fd;
+	char *buffer = NULL;
+	mqd_t msg_queue; //message queue descriptor(file descriptor)
+
+	// Use stat to find the size of the file
+	stat(info->filename, &st);
+	size = st.st_size;
+	printf("stat: %d\n", size);
+	buffer = (char*)malloc(size);
+
+	memset(&attrs, 0, sizeof attrs);
+	attrs.mq_maxmsg = 1;
+	attrs.mq_msgsize = size;
+	// open or create a mqueue if it does not exist
+	msg_queue = mq_open(info->argument_string, O_WRONLY | O_CREAT, 0666, &attrs);
+	if (msg_queue == -1) {
+		perror("msg_open");
+		exit(EXIT_FAILURE);
+	}
+	// open file for reading
+	fd = open(info->filename, O_RDONLY);
+	if (fd == -1) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+	// read the file into buffer
+	if (read(fd, buffer, size) == -1) {
+		perror("read");
+		free(buffer);
+		exit(EXIT_FAILURE);
+	}
+	// send the data into message queue
+	if (mq_send(msg_queue, buffer, size, 0) == -1) {
+		perror("mq_send");
+		free(buffer);
+		exit(EXIT_FAILURE);
+	} else {
+		printf("File data is sent into the queue, exiting the program..\n");
+		mq_close(msg_queue);
+		close(fd);
+	}
 
 }
 void queueReceive(const ipc_info *info){
+	printf("Starting queueReceive..\n");
+	struct mq_attr attrs;
+	int n;
+	char *buffer = NULL;
+	mqd_t msg_queue;
+	FILE *writeFile;
+	// open or create a mqueue if it does not exist
+	printf("Looking for the message queue:\n");
+	while ((msg_queue = mq_open(info->argument_string, O_RDONLY)) == -1);
+	// get the queue attributes
+	mq_getattr(msg_queue, &attrs);
+	printf("%ld\n", attrs.mq_msgsize);
+	n = attrs.mq_maxmsg;
+	buffer = (char*)malloc(attrs.mq_msgsize);
 
+	//open file for writing
+	writeFile = fopen(info->filename, "wb");
+	if (writeFile == NULL) {
+		perror("fopen");
+		exit(EXIT_FAILURE);
+	}
+	printf("%ld\n", attrs.mq_msgsize);
+	// receive the message from the queue
+	for (int i = 0; i < n; i++) {
+		mq_receive(msg_queue, buffer, attrs.mq_msgsize, NULL);
+	}
+	printf("%ld\n", attrs.mq_msgsize);
+
+	if (fwrite(buffer, attrs.mq_msgsize, 1, writeFile) != 1) {
+		perror("fwrite");
+		exit(EXIT_FAILURE);
+	} else {
+		fclose(writeFile);
+		mq_close(msg_queue);
+		// remove the queue name, the actual removal only happens after all processes(opening the mq) close the mq after this call is made
+		mq_unlink(info->argument_string);
+		printf("Successfully write data into file, exiting the program..\n");
+	}
 }
 
 void shmSend(const ipc_info *info){
@@ -417,13 +500,13 @@ void shmReceive(const ipc_info *info){
 }
 
 void run_IPC(ipc_info *info, int send) {
-	if (info->method == message) {
+	if (info->method == MESSAGE) {
 		(send)? messageSend(info): messageReceive(info);
-	} else if (info->method == pipes) {
+	} else if (info->method == PIPES) {
 		(send)? pipeSend(info): pipeReceive(info);
-	} else if (info->method == queue) {
+	} else if (info->method == QUEUE) {
 		(send)? queueSend(info): queueReceive(info);
-	} else if (info->method == shm) {
+	} else if (info->method == SHM) {
 		(send)? shmSend(info): shmReceive(info);
 	} else {
 		exit(EXIT_FAILURE);

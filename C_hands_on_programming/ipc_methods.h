@@ -15,11 +15,11 @@
 typedef struct option opts;
 
 typedef enum {
-	message,
-	pipes,
-	queue,
-	shm,
-	none
+	MESSAGE,
+	PIPES,
+	QUEUE,
+	SHM,
+	NONE
 }methods;
 
 typedef struct ipc_info{
