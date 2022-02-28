@@ -358,15 +358,15 @@ void pipeSend(const ipc_info *info){
 	 buffer = (char*)malloc(size);
 	 if (read(fd, buffer, size) == -1) {
 	     perror("read\n");
-	     exit(EXIT_FAILURE);
 	     free(buffer);
+	     exit(EXIT_FAILURE);
 	 }
 	 close(fd);
 	 //write to pipe
 	 if (write(fdp, buffer, size) == -1) {
 	     perror("write\n");
-	     exit(EXIT_FAILURE);
 	     free(buffer);
+	     exit(EXIT_FAILURE);
 	 }
 
 	close(fdp);
@@ -382,7 +382,9 @@ void pipeReceive(const ipc_info *info){
 	int bytes;
 
 	// open name pipe for reading
-	while ((fdp = open(info->argument_string, O_RDONLY)) == -1){}
+	while ((fdp = open(info->argument_string, O_RDONLY)) == -1) {
+		sleep(1);
+	}
 
 	 // open file for writing
 	 fd = open(info->filename, O_WRONLY | O_CREAT, 0644);//mode(file permission should be specified if O_CREATE is used)
@@ -393,7 +395,11 @@ void pipeReceive(const ipc_info *info){
 	 // read from pipe and write to file
 	 buffer = (char*)malloc(PIPE_BUF);
 	 while ((bytes = read(fdp, buffer, PIPE_BUF)) != 0) {
-		 write(fd, buffer, bytes);
+		 if (write(fd, buffer, bytes) == -1) {
+			 perror("write");
+			 free(buffer);
+			 exit(EXIT_FAILURE);
+		 }
 	 }
 
 	 close(fd);
@@ -464,7 +470,9 @@ void queueReceive(const ipc_info *info){
 	FILE *writeFile;
 	// open the message queue in a loop until it is created by the other process
 	printf("Looking for the message queue..\n");
-	while ((msg_queue = mq_open(info->argument_string, O_RDONLY)) == -1);
+	while ((msg_queue = mq_open(info->argument_string, O_RDONLY)) == -1) {
+		sleep(1);
+	}
 	printf("Found the requested queue\n");
 	// get the queue attributes
 	mq_getattr(msg_queue, &attrs);
