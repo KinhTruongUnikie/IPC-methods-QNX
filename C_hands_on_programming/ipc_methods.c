@@ -29,7 +29,7 @@ void printInstruction() {
 			"--help(-h): display all commands instruction and description(no arguments)\n"
 			"--message(-m): uses QNX native IPC message passing method, the arguments of both client and server must be the same\n"
 			"--queue(-q): uses queue as IPC method(TBD)\n"
-			"--pipe(-p): uses pipe as IPC method(TBD)\n"
+			"--pipe(-p): uses name pipe(FIFO) as IPC method(argument required)\n"
 			"--shm(-s): uses shared memory buffer as IPC method(argument required)\n"
 			"--file(-f): file used for read/write data(argument required)\n\n"
 			);
@@ -43,7 +43,6 @@ ipc_info checkOptions (int argc, char* argv[]) {
 	int qflag = 0;
 	int sflag = 0;
 	int fflag = 0;
-	char *filename = NULL;
 	// method id for choosing ipc method
 	ipc_info info;
 	while ((option = getopt_long(argc, argv, "hm:p:q:s:f:", longopts, NULL)) != -1) {
@@ -51,7 +50,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 			case 'h': {
 				printf("<HELP>\n"
 						"--message: client-server model, carries priority, QNX native API(argument <serverName>)\n"
-						"--pipe: POSIX, one directional(unamed pipe) message flow, slow, does not carry priority, portable(argument <TBD>)\n"
+						"--pipe: POSIX, portable, does not carry priority(argument <pipeName>)\n"
 						"--queue: POSIX, basically pipe with extra feature(argument <TBD>)\n"
 						"--shm: use shared memory region for message passing, required synchronization measure, e.g mutex, condvar(argument <bufferSize>)\n"
 						"--file: add the file for data transfer (argument <fileName>)\n"
@@ -66,6 +65,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 			}
 			case 'p': {
 				pflag++;
+				info.argument_string = optarg;
 				break;
 			}
 			case 'q': {
@@ -79,8 +79,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 			}
 			case 'f': {
 				fflag++;
-				filename = optarg;
-				info.filename = filename;
+				info.filename = optarg;
 				break;
 			}
 			default:
@@ -286,14 +285,13 @@ void messageReceive(const ipc_info *info) {
 				printf("Server receive a pulse code of %d and value of %x\n",
 						rbuf.pulse.code, rbuf.pulse.value.sival_int);
 			}
-			//printf("Server receive a pulse code of %d and value of %x\n", rbuf.pulse.code, rbuf.pulse.value.sival_int);
 		} else {
 			if (rbuf.type == HEADER_IOV_TYPE) {
 				char *data = NULL;
-				FILE *write;
+				FILE *writeFile;
 				// open file for writing
-				write = fopen(info->filename, "wb");
-				if (write == NULL) {
+				writeFile = fopen(info->filename, "wb");
+				if (writeFile == NULL) {
 					perror("Failed to open file!");
 					exit(EXIT_FAILURE);
 				}
@@ -304,9 +302,9 @@ void messageReceive(const ipc_info *info) {
 					exit(EXIT_FAILURE);
 				} else {
 					// write into file
-					fwrite(data, rbuf.header_msg.data_size, 1, write);
+					fwrite(data, rbuf.header_msg.data_size, 1, writeFile);
 					free(data);
-					fclose(write);
+					fclose(writeFile);
 				}
 
 				if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
@@ -323,10 +321,85 @@ void messageReceive(const ipc_info *info) {
 }
 
 void pipeSend(const ipc_info *info){
+	printf("Starting pipeSend..\n");
+	// remove potentially existing FIFO
+	remove(info->argument_string);
+	int fdp, fd, current, size;
+	char* buffer = NULL;
+
+	// create a name pipe
+	if (mkfifo(info->argument_string, 0666) == -1) {
+		perror("mkfifo");
+		exit(EXIT_FAILURE);
+	}
+
+	fdp = open(info->argument_string, O_WRONLY);
+	// open name pipe
+	 if (fdp == -1) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	 }
+
+	 // open file
+	 fd = open(info->filename, O_RDONLY);
+	 if (fd == -1) {
+		 perror("open");
+		 exit(EXIT_FAILURE);
+	 }
+
+	 current = lseek(fd, 0, SEEK_CUR);
+	 size = lseek(fd, 0, SEEK_END);
+	 //set the file pointer back to beginning of file
+	 lseek(fd, current, SEEK_SET);
+
+	 // read file
+	 buffer = (char*)malloc(size);
+	 if (read(fd, buffer, size) == -1) {
+	     perror("read\n");
+	     exit(EXIT_FAILURE);
+	     free(buffer);
+	 }
+	 close(fd);
+	 //write to pipe
+	 if (write(fdp, buffer, size) == -1) {
+	     perror("write\n");
+	     exit(EXIT_FAILURE);
+	     free(buffer);
+	 }
+
+	close(fdp);
+	free(buffer);
+	printf("File delivered by pipe successfully, exiting the program..\n");
 }
 
 void pipeReceive(const ipc_info *info){
+	printf("Starting pipeReceive..\n");
 
+	int fdp, fd;
+	char* buffer = NULL;
+	int bytes;
+
+	// open name pipe for reading
+	while ((fdp = open(info->argument_string, O_RDONLY)) == -1){}
+
+	 // open file for writing
+	 fd = open(info->filename, O_WRONLY | O_CREAT); //try O_APPEND, DPES WRONLY move file pointer, differences?
+	 if (fd == -1) {
+		 perror("open");
+		 exit(EXIT_FAILURE);
+	 }
+	 // read from pipe and write to file
+	 buffer = (char*)malloc(PIPE_BUF);
+	 while ((bytes = read(fdp, buffer, PIPE_BUF)) != 0) {
+		 write(fd, buffer, bytes);
+	 }
+
+	 close(fd);
+	 close(fdp);
+	 free(buffer);
+	 //server remove the FIFO after data is written into file
+	 remove(info->argument_string);
+	 printf("Write to file from pipe successfully, exiting the program..\n");
 }
 
 void queueSend(const ipc_info *info){
