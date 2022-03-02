@@ -8,7 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ipc_methods.h"
+
+#include <fcntl.h>
 #include <mqueue.h>
+#include <sys/mman.h>
+
 #include "msg.h"
 
 // struct option longopts array
@@ -53,7 +57,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 						"--message: client-server model, carries priority, QNX native API(argument <serverName>)\n"
 						"--pipe: POSIX, portable, does not carry priority(argument <pipeName>)\n"
 						"--queue: POSIX, basically pipe with extra feature(argument <queueName>)\n"
-						"--shm: use shared memory region for message passing, required synchronization measure, e.g mutex, condvar(argument <bufferSize>)\n"
+						"--shm: use shared memory region for message passing, required synchronization measure, e.g mutex, condvar(argument <shmName>)\n"
 						"--file: add the file for data transfer (argument <fileName>)\n"
 						"</HELP>\n"
 						);
@@ -76,7 +80,7 @@ ipc_info checkOptions (int argc, char* argv[]) {
 			}
 			case 's': {
 				sflag++;
-				info.argument_int = atoi(optarg);
+				info.argument_string = optarg;
 				break;
 			}
 			case 'f': {
@@ -358,6 +362,7 @@ void pipeSend(const ipc_info *info){
 	 buffer = (char*)malloc(size);
 	 if (read(fd, buffer, size) == -1) {
 	     perror("read\n");
+	     close(fd);
 	     free(buffer);
 	     exit(EXIT_FAILURE);
 	 }
@@ -508,11 +513,198 @@ void queueReceive(const ipc_info *info){
 	}
 }
 
-void shmSend(const ipc_info *info){
-
+void unlink_and_exit(char* shm_name) {
+	(void)shm_unlink(shm_name);
+	exit(EXIT_FAILURE);
 }
-void shmReceive(const ipc_info *info){
 
+void *get_shared_memory_pointer( char *name)
+{
+	shm_t *ptr;
+	int fd;
+
+	printf("Getting access to shared memory region..(Program would stuck in a loop for non-exist shm name\n");
+
+	while ((fd = shm_open(name, O_RDWR, 0)) == -1) {
+		/* wait one second then try again */
+		sleep(1);
+	}
+
+	while ((ptr = mmap(0, sizeof(shm_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+		sleep(1);
+	}
+	/* no longer need fd */
+	(void)close(fd);
+
+	while (!ptr->init) {
+		sleep(1);
+	}
+	return ptr;
+}
+
+void check_leading_slash(char* name) {
+	if (*name != '/') {
+		perror("Shared memory name should start with leading '/' character");
+		exit(EXIT_FAILURE);
+	}
+}
+
+void shmSend(const ipc_info *info){
+	printf("Starting shmSend..\n");
+	check_leading_slash(info->argument_string);
+
+	int fd, fd1, size, bytes_read, total;
+	shm_t *shm_ptr;
+	pthread_mutexattr_t m_attr;
+	pthread_condattr_t c_attr;
+	struct stat st;
+
+	// Use stat to find the size of the file
+	stat(info->filename, &st);
+	size = st.st_size;
+	//open the file for reading
+	fd1 = open(info->filename, O_RDONLY);
+	if (fd1 == -1) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	// create shared memory object
+	fd = shm_open(info->argument_string, O_RDWR | O_CREAT, 0666);
+	if (fd == -1) {
+		perror("shm_open");
+		unlink_and_exit(info->argument_string);
+	}
+	// allocate the size of the shared memory object
+	if (ftruncate(fd, sizeof(shm_t)) == -1) {
+		perror("ftruncate");
+		unlink_and_exit(info->argument_string);
+	}
+	// get a pointer to shared memory region
+	shm_ptr = mmap(NULL, sizeof(shm_t), PROT_WRITE, MAP_SHARED, fd, 0);
+	if (shm_ptr == MAP_FAILED) {
+		perror("mmap");
+		unlink_and_exit(info->argument_string);
+	}
+	//close fd
+	close(fd);
+
+	pthread_mutexattr_init(&m_attr);
+	pthread_mutexattr_setpshared(&m_attr, PTHREAD_PROCESS_SHARED);
+	if (pthread_mutex_init(&shm_ptr->mutex, &m_attr) != EOK) {
+		perror("pthread_mutex_init");
+		unlink_and_exit(info->argument_string);
+	}
+
+	pthread_condattr_init(&c_attr);
+	pthread_condattr_setpshared(&c_attr, PTHREAD_PROCESS_SHARED);
+	if (pthread_cond_init(&shm_ptr->cond, &c_attr) != EOK) {
+		perror("pthread_cond_init");
+		unlink_and_exit(info->argument_string);
+	}
+	// initialized shared memory object member values
+	shm_ptr->init = 1;
+	shm_ptr->sent = 0;
+	shm_ptr->end = 0;
+	// enter critical section, lock the mutex
+	total = 0;
+	while (total < size) {
+		if (pthread_mutex_lock(&shm_ptr->mutex) != EOK) {
+			perror("pthread_mutex_lock");
+			unlink_and_exit(info->argument_string);
+		}
+		// check sent status and blocked if data still has not been retrieved 
+		while (shm_ptr->sent) {
+			pthread_cond_wait(&shm_ptr->cond, &shm_ptr->mutex);
+		}
+		//read the file into shared buffer;
+		if ((bytes_read = read(fd1, shm_ptr->buffer, SHM_SIZE)) == -1) {
+			perror("read\n");
+			exit(EXIT_FAILURE);
+		}
+		total += bytes_read;
+		if (total == size) {
+			shm_ptr->end = 1;
+		}
+		// update shared memory object
+		shm_ptr->sent = 1;
+		shm_ptr->data_size = bytes_read;
+		// unlock the mutex
+		if (pthread_mutex_unlock(&shm_ptr->mutex) != EOK) {
+			perror("pthread_mutex_unlock");
+			unlink_and_exit(info->argument_string);
+		}
+		//wake up process which is currently condvar blocked
+		if (pthread_cond_broadcast(&shm_ptr->cond) != EOK) {
+			perror("pthread_cond_broadcast");
+			unlink_and_exit(info->argument_string);
+		}
+	}
+	close(fd);
+	close(fd1);
+	if (munmap(shm_ptr, sizeof(shm_t)) == -1)
+	{
+		perror("munmap");
+	}
+	printf("Data successfully sent\n");
+}
+
+void shmReceive(const ipc_info *info){
+	printf("Starting shmReceive..\n");
+	check_leading_slash(info->argument_string);
+
+	shm_t *shm_p;
+	int fd, done;
+	done = 0;
+	// get shared memory object pointer
+	shm_p = get_shared_memory_pointer(info->argument_string);
+	//open file for writing
+	fd = open(info->filename, O_WRONLY | O_CREAT, 0666);
+	if (fd == -1) {
+		perror("open");
+		unlink_and_exit(info->argument_string);
+		exit(EXIT_FAILURE);
+	}
+
+	while (!done) {
+		// enter critical section, lock the mutex
+		if (pthread_mutex_lock(&shm_p->mutex) != EOK) {
+			perror("pthread_mutex_lock");
+			unlink_and_exit(info->argument_string);
+		}
+		// check end status 
+		if (shm_p->end) {
+			done = shm_p->end;
+		}
+		// check sent status and blocked if shmSend still has not sent new data at this point
+		while (!shm_p->sent) {
+			if (pthread_cond_wait(&shm_p->cond, &shm_p->mutex) != EOK) {
+				perror("pthread_cond_wait");
+				unlink_and_exit(info->argument_string);
+			}
+		}
+		// write into file
+		if (write(fd, shm_p->buffer, shm_p->data_size) == -1) {
+			perror("fwrite");
+			unlink_and_exit(info->argument_string);
+		}
+		// reset sent status
+		shm_p->sent = 0;
+		// unlock the mutex
+		if (pthread_mutex_unlock(&shm_p->mutex) != EOK) {
+			perror("pthread_mutex_unlock");
+			unlink_and_exit(info->argument_string);
+		}
+		//wake up process which is currently condvar blocked
+		if (pthread_cond_broadcast(&shm_p->cond) != EOK) {
+			perror("pthread_cond_broadcast");
+			unlink_and_exit(info->argument_string);
+		}
+	}
+	if (shm_unlink(info->argument_string) == -1) {
+		perror("shm_unlink");
+	}
+	printf("Successfully write data into file, exiting the program..\n");
 }
 
 void run_IPC(ipc_info *info, int send) {
