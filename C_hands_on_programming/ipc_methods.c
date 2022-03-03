@@ -489,7 +489,6 @@ void queueReceive(const ipc_info *info){
 		perror("fopen");
 		exit(EXIT_FAILURE);
 	}
-
 	buffer = (char*)malloc(attrs.mq_msgsize);
 	// receive the message from the queue
 
