@@ -12,6 +12,7 @@
 #include <getopt.h>
 #include <sys/iomsg.h>
 
+#define SHM_SIZE 4096
 typedef struct option opts;
 
 typedef enum {
@@ -29,6 +30,14 @@ typedef struct ipc_info{
 	int argument_int;
 } ipc_info;
 
+typedef struct {
+	volatile unsigned init;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	int sent;
+	char buffer[SHM_SIZE];
+	int end;
+}shm_t;
 void printInstruction();
 ipc_info checkOptions (int argc, char* argv[]);
 void run_IPC(ipc_info *info, int send);
@@ -44,5 +53,8 @@ void queueReceive(const ipc_info *info);
 
 void shmSend(const ipc_info *info);
 void shmReceive(const ipc_info *info);
+void check_leading_slash(char* name);
+void unlink_and_exit(char* name);
+void *get_shared_memory_pointer( char *name);
 
 #endif /* IPC_;METHODS_H_ */
