@@ -35,6 +35,7 @@ typedef struct {
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
 	int sent;
+	int data_size;
 	char buffer[SHM_SIZE];
 	int end;
 }shm_t;
